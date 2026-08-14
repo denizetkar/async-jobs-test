@@ -31,6 +31,7 @@ services:
 
   worker:
     build: .
+    command: uv run procrastinate -a simapp.tasks.app worker
     depends_on:
       postgres:
         condition: service_healthy

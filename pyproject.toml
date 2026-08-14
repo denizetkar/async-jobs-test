@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.5.0",
     "alembic>=1.14.0",
+    "procrastinate>=3.9.0",
     "python-multipart>=0.0.12",
     "typer>=0.27.1",
     "httpx>=0.28.1",
