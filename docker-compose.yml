@@ -15,6 +15,44 @@ services:
       timeout: 3s
       retries: 10
 
+  temporal-postgres:
+    image: postgres:17.10
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:1.29
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: temporal-postgres
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.52.1
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8088
+    ports:
+      - "8088:8088"
+
   server:
     build: .
     command: uv run uvicorn simapp.main:app --host 0.0.0.0 --port 8000 --reload
@@ -23,21 +61,29 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      temporal:
+        condition: service_started
     environment:
       SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
+      TEMPORAL_ADDRESS: temporal:7233
     volumes:
       - ./src:/app/src
       - ./scripts:/app/scripts
 
   worker:
     build: .
+    command: uv run python -m simapp.temporal_worker
     depends_on:
       postgres:
         condition: service_healthy
+      temporal:
+        condition: service_started
     environment:
       SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
+      TEMPORAL_ADDRESS: temporal:7233
     volumes:
       - ./src:/app/src
 
 volumes:
   pgdata:
+  temporal-pgdata:

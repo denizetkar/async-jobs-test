@@ -21,15 +21,9 @@ _scheduler_instance: object | None = None
 
 
 def get_scheduler() -> object:
-    """Returns the active SimulationScheduler implementation.
-
-    Each engine branch overrides this with its own scheduler.
-    On common, this raises NotImplementedError — there is no default engine.
-    """
+    """Returns the TemporalScheduler implementation."""
     global _scheduler_instance
     if _scheduler_instance is None:
-        raise NotImplementedError(
-            "No scheduler configured. Each engine branch provides its own "
-            "implementation via simapp.tasks and deps.py."
-        )
+        from simapp.temporal_client import TemporalScheduler
+        _scheduler_instance = TemporalScheduler()
     return _scheduler_instance
