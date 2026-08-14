@@ -1,9 +1,4 @@
-"""Shared pytest fixtures.
-
-Tests use FastAPI's TestClient (sync) which runs the app in-process.
-A live Postgres is required — these are integration tests, not unit tests.
-Set SIMAPP_DATABASE_URL to point at a test database.
-"""
+"""Shared pytest fixtures — engine-specific overrides."""
 
 from __future__ import annotations
 
@@ -16,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 TEST_DATABASE_URL = os.environ.get(
     "SIMAPP_TEST_DATABASE_URL",
@@ -23,8 +19,84 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 
+class StubScheduler:
+    """Test-only scheduler that processes inline in background threads.
+
+    Mimics async engine behavior by updating DB row status in a daemon thread
+    after the request returns. SessionLocal is imported at call time so the
+    monkeypatched test-DB session factory is used.
+    """
+
+    def schedule_dataset_processing(
+        self,
+        session: Session,
+        dataset_id,
+        filename: str,
+    ) -> None:
+        import threading
+        import time
+
+        def _process() -> None:
+            from simapp.db import SessionLocal
+            from simapp.models import Dataset, DatasetStatus
+
+            time.sleep(2)
+            with SessionLocal() as s:
+                d = s.get(Dataset, dataset_id)
+                if d is not None:
+                    d.status = DatasetStatus.ready
+                    s.commit()
+
+        threading.Thread(target=_process, daemon=True).start()
+
+    def schedule_simulation(
+        self,
+        session: Session,
+        simulation_id,
+        dataset_id,
+        parameters: dict,
+    ) -> None:
+        import threading
+        import time
+
+        from simapp.models import DatasetStatus
+
+        chunks = parameters.get("chunks", 4)
+
+        def _process() -> None:
+            from simapp.db import SessionLocal
+            from simapp.models import Dataset, Simulation, SimulationStatus
+
+            for _ in range(30):
+                with SessionLocal() as s:
+                    d = s.get(Dataset, dataset_id)
+                    if d is not None and d.status == DatasetStatus.ready:
+                        break
+                time.sleep(1)
+            with SessionLocal() as s:
+                sim = s.get(Simulation, simulation_id)
+                if sim is not None:
+                    sim.status = SimulationStatus.running
+                    s.commit()
+            chunk_results = [
+                {"chunk_index": i, "value": i * 2} for i in range(chunks)
+            ]
+            with SessionLocal() as s:
+                sim = s.get(Simulation, simulation_id)
+                if sim is not None:
+                    sim.result = {
+                        "chunks": chunk_results,
+                        "total": sum(c["value"] for c in chunk_results),
+                        "chunk_count": chunks,
+                    }
+                    sim.status = SimulationStatus.completed
+                    s.commit()
+
+        threading.Thread(target=_process, daemon=True).start()
+
+
 def _apply_engine_schema(engine) -> None:
-    """Apply engine-specific schema via post_migrate.py hook if present."""
+    """Apply engine-specific schema via post_migrate.py hook."""
     hook = Path("scripts/post_migrate.py")
     if not hook.exists():
         return
@@ -38,7 +110,7 @@ def _apply_engine_schema(engine) -> None:
 @pytest.fixture(scope="session")
 def db_engine():
     """Session-scoped engine pointing at the test database."""
-    engine = create_engine(TEST_DATABASE_URL, echo=False, pool_pre_ping=True)
+    engine = create_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
 
     with engine.connect() as conn:
         conn.execute(text("DROP TABLE IF EXISTS simulations CASCADE"))
@@ -74,8 +146,11 @@ def db_session(db_engine) -> Generator[Session, None]:
 
 @pytest.fixture(scope="function")
 def client(db_engine, monkeypatch) -> Generator[TestClient, None]:
-    """FastAPI TestClient with the DB engine patched to use the test database."""
+    """FastAPI TestClient with the DB engine patched and StubScheduler overriding
+    get_scheduler so in-process tests do not require a live Prefect server."""
     import simapp.db as db_module
+    from simapp.deps import get_scheduler
+    from simapp.main import app
 
     test_engine = db_engine
     test_session_factory = sessionmaker(bind=test_engine, expire_on_commit=False)
@@ -83,10 +158,56 @@ def client(db_engine, monkeypatch) -> Generator[TestClient, None]:
     monkeypatch.setattr(db_module, "engine", test_engine)
     monkeypatch.setattr(db_module, "SessionLocal", test_session_factory)
 
-    from simapp.main import app
+    app.dependency_overrides[get_scheduler] = lambda: StubScheduler()
+
+    from simapp.deps import get_session
+
+    def _test_get_session() -> Generator[Session, None]:
+        session = test_session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_session] = _test_get_session
 
     with TestClient(app) as c:
         yield c
+
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="function")
+def gap_client(db_engine, monkeypatch) -> Generator[TestClient, None]:
+    """FastAPI TestClient WITHOUT the StubScheduler override.
+
+    Used by the consistency-gap test, which must exercise the REAL
+    PrefectScheduler with run_deployment patched to fail. The real scheduler
+    is wired through the default get_scheduler dependency.
+    """
+    import simapp.db as db_module
+    from simapp.deps import get_session
+    from simapp.main import app
+
+    test_engine = db_engine
+    test_session_factory = sessionmaker(bind=test_engine, expire_on_commit=False)
+
+    monkeypatch.setattr(db_module, "engine", test_engine)
+    monkeypatch.setattr(db_module, "SessionLocal", test_session_factory)
+
+    def _test_get_session() -> Generator[Session, None]:
+        session = test_session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_session] = _test_get_session
+
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture

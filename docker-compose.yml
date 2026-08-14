@@ -15,6 +15,31 @@ services:
       timeout: 3s
       retries: 10
 
+  prefect-postgres:
+    image: postgres:17.10
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect
+      POSTGRES_DB: prefect
+    volumes:
+      - prefect-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect -d prefect"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  prefect-server:
+    image: prefecthq/prefect:3-python3.12
+    command: prefect server start --host 0.0.0.0 --ui
+    depends_on:
+      prefect-postgres:
+        condition: service_healthy
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-postgres:5432/prefect
+    ports:
+      - "4200:4200"
+
   server:
     build: .
     command: uv run uvicorn simapp.main:app --host 0.0.0.0 --port 8000 --reload
@@ -23,21 +48,29 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      prefect-server:
+        condition: service_started
     environment:
       SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
+      PREFECT_API_URL: http://prefect-server:4200/api
     volumes:
       - ./src:/app/src
       - ./scripts:/app/scripts
 
   worker:
     build: .
+    command: uv run python -m simapp.prefect_worker
     depends_on:
       postgres:
         condition: service_healthy
+      prefect-server:
+        condition: service_started
     environment:
       SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
+      PREFECT_API_URL: http://prefect-server:4200/api
     volumes:
       - ./src:/app/src
 
 volumes:
   pgdata:
+  prefect-pgdata:
