@@ -17,7 +17,7 @@ COPY tests/ ./tests/
 # Ensure upload dir exists
 RUN mkdir -p /tmp/simapp_uploads
 
-ENV SIMAPP_DATABASE_URL=postgresql+psycopg2://simapp:simapp@postgres:5432/simapp
+ENV SIMAPP_DATABASE_URL=postgresql+psycopg://simapp:simapp@postgres:5432/simapp
 ENV SIMAPP_UPLOAD_DIR=/tmp/simapp_uploads
 
 EXPOSE 8000
