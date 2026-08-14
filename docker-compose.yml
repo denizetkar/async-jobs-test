@@ -9,11 +9,54 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=4"
+      - "-c"
+      - "max_wal_senders=4"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U simapp -d simapp"]
       interval: 3s
       timeout: 3s
       retries: 10
+
+  kafka:
+    image: quay.io/debezium/kafka:3.6
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      CLUSTER_ID: oh-sxaDRTcyAr6pFRbXyzA
+      NODE_ID: 1
+      NODE_ROLE: combined
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:9092,CONTROLLER://kafka:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+  connect:
+    image: quay.io/debezium/connect:3.6
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: my_connect_configs
+      OFFSET_STORAGE_TOPIC: my_connect_offsets
+      STATUS_STORAGE_TOPIC: my_connect_statuses
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 5s
+      retries: 24
+      start_period: 45s
 
   server:
     build: .
@@ -31,13 +74,30 @@ services:
 
   worker:
     build: .
+    command: uv run python -m simapp.outbox_consumer
     depends_on:
       postgres:
         condition: service_healthy
+      kafka:
+        condition: service_started
+      connect:
+        condition: service_healthy
+      debezium-init:
+        condition: service_completed_successfully
     environment:
       SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     volumes:
       - ./src:/app/src
+
+  debezium-init:
+    build: .
+    command: uv run python scripts/register_debezium_connector.py
+    environment:
+      CONNECT_URL: http://connect:8083
+    depends_on:
+      connect:
+        condition: service_healthy
 
 volumes:
   pgdata:

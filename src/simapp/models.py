@@ -71,3 +71,34 @@ class Simulation(Base):
 
     def __repr__(self) -> str:
         return f"<Simulation id={self.id} status={self.status}>"
+
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    aggregate_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    aggregate_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ProcessedEvent(Base):
+    """Idempotency ledger: Kafka event IDs already processed by the consumer.
+
+    Debezium EventRouter puts the event ID in the ``id`` Kafka header by
+    default (``table.field.event.id=id``). The consumer records each ID here
+    before committing the offset so redelivered events are skipped.
+    """
+
+    __tablename__ = "processed_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

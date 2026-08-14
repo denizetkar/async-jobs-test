@@ -63,8 +63,24 @@ def upgrade() -> None:
         ),
     )
 
+    op.create_table(
+        "outbox_events",
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("aggregate_type", sa.String(255), nullable=False),
+        sa.Column("aggregate_id", sa.String(255), nullable=False),
+        sa.Column("event_type", sa.String(255), nullable=False),
+        sa.Column("payload", postgresql.JSONB, nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+    )
+
 
 def downgrade() -> None:
+    op.drop_table("outbox_events")
     op.drop_table("simulations")
     op.drop_table("datasets")
     sa.Enum(name="simulationstatus").drop(op.get_bind(), checkfirst=True)
