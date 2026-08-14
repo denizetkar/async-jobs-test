@@ -13,6 +13,7 @@ COPY scripts/ ./scripts/
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 COPY tests/ ./tests/
+COPY docker-compose.yml ./
 
 # Ensure upload dir exists
 RUN mkdir -p /tmp/simapp_uploads

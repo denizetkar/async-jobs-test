@@ -2,10 +2,10 @@
 """Runtime verification for async-jobs-test branches.
 
 Usage:
-    uv run python scripts/verify.py [branch]
+    uv run python scripts/verify.py
 
 Replaces the bash verify.sh with proper health checks, retries, and
-structured output. Requires: docker compose v2, uv.
+structured output. Requires: docker compose v2, uv. Run on the branch to verify.
 """
 
 from __future__ import annotations
@@ -139,25 +139,16 @@ def stage_pytest() -> StageResult:
 
 
 @app.command()
-def verify(branch: str = typer.Argument(None, help="Branch to verify (default: current)")):
+def verify():
     repo_root = Path(__file__).parent.parent
     results: list[StageResult] = []
-
-    # Branch handling
-    original = run(["git", "branch", "--show-current"], cwd=repo_root)
-    current = original.stdout.strip()
-    target = branch or current
 
     dirty = run(["git", "status", "--porcelain"], cwd=repo_root)
     if dirty.stdout.strip():
         print("ERROR: working tree is dirty. Commit or stash first.", file=sys.stderr)
         raise typer.Exit(1)
 
-    if target != current:
-        r = run(["git", "checkout", target], cwd=repo_root)
-        if r.returncode != 0:
-            print(f"ERROR: git checkout {target} failed: {r.stderr}", file=sys.stderr)
-            raise typer.Exit(1)
+    current = run(["git", "branch", "--show-current"], cwd=repo_root).stdout.strip()
 
     stages: list[tuple[str, object]] = [
         ("build", stage_compose_build),
@@ -188,7 +179,7 @@ def verify(branch: str = typer.Argument(None, help="Branch to verify (default: c
     # Summary
     failed = [r for r in results if not r.passed]
     print(f"\n{'='*60}")
-    print(f"Branch: {target}")
+    print(f"Branch: {current}")
     print(f"Result: {len(results)-len(failed)} passed, {len(failed)} failed")
     if failed:
         print("Failures:")
