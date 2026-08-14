@@ -13,9 +13,10 @@ dependencies = [
     "pydantic-settings>=2.5.0",
     "alembic>=1.14.0",
     "python-multipart>=0.0.12",
+    "docker>=7.2.0",
     "typer>=0.27.1",
     "httpx>=0.28.1",
-    "docker>=7.2.0",
+    "dbos>=2.29.0",
 ]
 
 [dependency-groups]

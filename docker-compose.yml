@@ -23,6 +23,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      dbos-init:
+        condition: service_completed_successfully
     environment:
       SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
     volumes:
@@ -31,13 +33,25 @@ services:
 
   worker:
     build: .
+    command: uv run python -m simapp.dbos_worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dbos-init:
+        condition: service_completed_successfully
+    environment:
+      SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
+    volumes:
+      - ./src:/app/src
+
+  dbos-init:
+    build: .
+    command: uv run python -c "from simapp.dbos_config import dbos; import simapp.tasks_dbos; dbos.launch(); dbos.destroy()"
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
-    volumes:
-      - ./src:/app/src
 
 volumes:
   pgdata:
