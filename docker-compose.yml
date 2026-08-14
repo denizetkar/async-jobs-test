@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:17.10
+    environment:
+      POSTGRES_USER: simapp
+      POSTGRES_PASSWORD: simapp
+      POSTGRES_DB: simapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simapp -d simapp"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build: .
+    command: uv run uvicorn simapp.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
+    volumes:
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+
+  worker:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SIMAPP_DATABASE_URL: postgresql+psycopg://simapp:simapp@postgres:5432/simapp
+    volumes:
+      - ./src:/app/src
+
+volumes:
+  pgdata:
