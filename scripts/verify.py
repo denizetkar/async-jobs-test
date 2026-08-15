@@ -162,34 +162,49 @@ def verify():
         ("pytest", stage_pytest),
     ]
 
-    for name, fn in stages:
-        result = fn()
-        results.append(result)
-        status = "PASS" if result.passed else "FAIL"
-        print(f"  {status}  {result.name}")
+    try:
+        for name, fn in stages:
+            result = fn()
+            results.append(result)
+            status = "PASS" if result.passed else "FAIL"
+            print(f"  {status}  {result.name}")
 
-    failed = [r for r in results if not r.passed]
+        failed = [r for r in results if not r.passed]
 
-    if failed:
-        print("\n--- worker logs (last 50 lines) ---")
-        print(compose("logs", "worker", "--tail", "50").stdout)
+        if failed:
+            print("\n--- worker logs (last 50 lines) ---")
+            print(compose("logs", "worker", "--tail", "50").stdout)
 
-    compose("down", "-v")
+            # Write full failure logs to disk before teardown
+            for f in failed:
+                slug = "".join(c if c.isalnum() else "-" for c in f.name.lower()).strip("-")
+                if slug:
+                    art_dir = Path(".omo") / "verify-artifacts"
+                    art_dir.mkdir(parents=True, exist_ok=True)
+                    ts = int(time.time())
+                    path = art_dir / f"{current}-{slug}-{ts}.log"
+                    path.write_text(f.log)
+                    print(f"    artifact: {path}")
 
-    # Summary
-    failed = [r for r in results if not r.passed]
-    print(f"\n{'='*60}")
-    print(f"Branch: {current}")
-    print(f"Result: {len(results)-len(failed)} passed, {len(failed)} failed")
-    if failed:
-        print("Failures:")
-        for f in failed:
-            print(f"  x {f.name}")
-            if f.log:
-                print(f"    log: {f.log[:2000]}")
-    print(f"{'='*60}")
+        # Summary
+        failed = [r for r in results if not r.passed]
+        print(f"\n{'='*60}")
+        print(f"Branch: {current}")
+        print(f"Result: {len(results)-len(failed)} passed, {len(failed)} failed")
+        if failed:
+            print("Failures:")
+            for f in failed:
+                print(f"  x {f.name}")
+                if f.log:
+                    print(f"    log: {f.log[:2000]}")
+        print(f"{'='*60}")
 
-    raise typer.Exit(0 if not failed else 1)
+        raise typer.Exit(0 if not failed else 1)
+    finally:
+        try:
+            compose("down", "-v", "--remove-orphans")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
