@@ -182,7 +182,8 @@ def verify():
                     art_dir = Path(".omo") / "verify-artifacts"
                     art_dir.mkdir(parents=True, exist_ok=True)
                     ts = int(time.time())
-                    path = art_dir / f"{current}-{slug}-{ts}.log"
+                    branch_slug = current.replace("/", "-")
+                    path = art_dir / f"{branch_slug}-{slug}-{ts}.log"
                     path.write_text(f.log)
                     print(f"    artifact: {path}")
 
