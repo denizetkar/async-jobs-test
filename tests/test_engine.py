@@ -1,4 +1,5 @@
 """Unit tests for DBOS engine — sandbox-safe via socket probe."""
+import importlib
 import socket
 import sys
 
@@ -16,6 +17,27 @@ def _db_reachable() -> bool:
         return True
     except OSError:
         return False
+
+
+def test_conftest_imports_engine_task_module_for_this_branch() -> None:
+    """Regression for ModuleNotFoundError cascade (verify 2026-08-14: every
+    client-fixture test ERROR'd because conftest imported simapp.tasks, a main-only
+    module; this branch's engine module is tasks_dbos)."""
+    import importlib
+
+    # conftest module itself must import cleanly in sandbox...
+    mod = importlib.import_module("tests.conftest")
+    # ... and its client fixture's wiring must resolve against THIS branch's engine
+    # module: drive the fixture's module-resolution by checking the engine module's
+    # SessionLocal attribute exists (the symbol the fixture monkeypatches).
+    import simapp.tasks_dbos as tasks_module  # the import form conftest now uses
+
+    assert hasattr(mod, "client")
+    assert hasattr(tasks_module, "SessionLocal"), (
+        "conftest's client fixture monkeypatches <engine>.SessionLocal; "
+        "the module it imports must define it"
+    )
+
 
 dbos_sdk = pytest.importorskip("dbos")
 
