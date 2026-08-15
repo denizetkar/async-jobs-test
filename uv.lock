@@ -864,9 +864,9 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "docker", specifier = ">=7.2.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "pytest", specifier = ">=8.3.0" },
-    { name = "pytest-asyncio", specifier = ">=0.24.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.27.1" },
 ]

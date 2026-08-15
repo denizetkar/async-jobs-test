@@ -42,7 +42,7 @@ those task IDs to start simulations with parameters. The engine must:
 | Engine | Transactional Scheduling | Runtime Task DAG | Postgres-Native | Infra Complexity | Python/FastAPI | License | Maturity |
 |---|---|---|---|---|---|---|---|
 | **procrastinate** 3.9 | YES — `configure(connection=conn).defer()` | NO — polling | YES (only PG) | Low (PG only) | Excellent (async-first) | MIT | Production-ready |
-| **DBOS** 2.28 | YES — `enqueue_in_transaction(session, ...)` | YES — `set_event`/`recv` | YES (PG only) | Low (PG only) | Excellent (FastAPI-native) | MIT | Production-ready |
+| **DBOS** 2.29 | YES — `enqueue_in_transaction(session, ...)` | YES — `set_event`/`get_event` | YES (PG only) | Low (PG only) | Excellent (FastAPI-native) | MIT | Production-ready |
 | **Temporal** 1.31 | NO — RPC to Temporal Server | YES — signals, retry-bounded activities | NO (separate DB) | High (Server + DB + UI) | Good (mature SDK) | Apache-2.0 | Production-ready |
 | **Prefect** 3.8 | NO — Prefect Server API | YES — `.map()` + retry task | NO (separate DB) | Medium-High (Server + DB) | Good (async, `serve()`) | Apache-2.0 | Production-ready |
 | **Outbox + CDC** | YES — outbox row in-tx → Debezium → Kafka | NO — polling | YES (outbox in app DB) | High (Kafka + Debezium + Connect) | N/A (architectural pattern) | OSS | Production-ready |
@@ -116,7 +116,7 @@ client.enqueue_in_transaction(
 session.commit()
 ```
 
-**Runtime Task DAG: YES — native `set_event`/`recv`.** DBOS has no DAG
+**Runtime Task DAG: YES — native `set_event`/`get_event`.** DBOS has no DAG
 concept at all — workflows are plain Python functions. The simulation
 workflow calls `preprocess_step`, fans out N `simulate_chunk` steps via
 `Queue.enqueue()`, then collects results and calls `postprocess_step`. N is
@@ -125,7 +125,7 @@ values.
 
 The inter-workflow dependency `simulation → dataset` is expressed natively:
 `process_dataset_wf` calls `DBOS.set_event()` to signal completion.
-`simulation_wf` calls `DBOS.recv()` to block (with timeout) until the
+`simulation_wf` calls `DBOS.get_event()` to block (with timeout) until the
 dataset is ready. The frontend starts simulations immediately — the engine
 handles the waiting natively. Each connected component (upload + simulations)
 is one workflow by reachability.
@@ -134,13 +134,13 @@ is one workflow by reachability.
 @DBOS.workflow()
 def process_dataset_wf(dataset_id: str, filename: str) -> str:
     _process_dataset_step(dataset_id)
-    DBOS.set_event(f"dataset-ready-{dataset_id}", "ready")
+    DBOS.set_event("ready", "ready")
     return "processed"
 
 @DBOS.workflow()
 def simulation_wf(simulation_id: str, dataset_id: str, chunks: int) -> str:
     # Block until dataset ready — engine-native dependency edge
-    DBOS.recv(topic=f"dataset-ready-{dataset_id}", timeout_seconds=120)
+    DBOS.get_event(f"dataset-{dataset_id}", "ready", timeout_seconds=120)
     _preprocess_step(simulation_id)
     handles = [
         sim_queue.enqueue(_simulate_chunk_step, simulation_id, i)
@@ -151,8 +151,8 @@ def simulation_wf(simulation_id: str, dataset_id: str, chunks: int) -> str:
     return "completed"
 ```
 
-**Infrastructure:** Postgres only (separate system database `simapp_dbos` on
-the same instance). Worker runs as `python -m simapp.dbos_worker`.
+**Infrastructure:** Postgres only (system tables in same database as app —
+`simapp`). Worker runs as `python -m simapp.dbos_worker`.
 
 **Key test:** `tests/test_transactional.py` — proves that rollback cancels
 the enqueued workflow. `tests/test_simulations.py` — demonstrates immediate
@@ -161,11 +161,11 @@ simulation start with native event-based waiting.
 **Pros:** Satisfies BOTH hard requirements. Plain Python workflows (no DSL).
 Durable execution with automatic recovery from checkpoints. FastAPI-native.
 MIT licensed. Postgres-only (no extra infra). Native inter-workflow
-dependencies via `set_event`/`recv`.
+dependencies via `set_event`/`get_event`.
 
 **Cons:** Younger ecosystem than Temporal. System database is separate from
 app database (though same Postgres instance). Sync-only `enqueue_in_transaction`
-(async callers must bridge via `run_sync`). `recv` timeout is finite — a very
+(async callers must bridge via `run_sync`). `get_event` timeout is finite — a very
 slow dataset processing could exceed it.
 
 ---
@@ -235,7 +235,7 @@ activity polling.
 **Cons:** CANNOT do transactional enqueue (architectural). Heavy infra
 (Server + DB + UI). Learning curve for the workflow programming model.
 Separate datastore from app DB. Inter-workflow dependency is a polling
-workaround (not a native signal primitive like DBOS's `recv`).
+workaround (not a native signal primitive like DBOS's `get_event`).
 
 **Gap test result:** When the Temporal server is down, the dataset row is
 committed to Postgres but no workflow is started. The simulation stays in
@@ -251,8 +251,8 @@ SQLAlchemy transaction.
 
 **Runtime Task DAG: YES — `.map()` + retry task.** Prefect 3's `.map()`
 creates task runs at runtime. The simulation flow preprocesses, maps
-`simulate_chunk_task` over `range(chunks)`, then aggregates with
-`.collect()`. N is determined at runtime.
+`simulate_chunk_task` over `range(chunks)`, then aggregates via
+`chunk_results.result()`. N is determined at runtime.
 
 The inter-workflow dependency `simulation → dataset` is expressed as a retry
 task: `wait_dataset_task` raises if the dataset isn't ready; Prefect's
@@ -262,14 +262,13 @@ starts simulations immediately — the engine handles the waiting.
 ```python
 @flow(name="simulation_flow")
 def simulation_flow(simulation_id: str, dataset_id: str, chunks: int) -> str:
-    wait_dataset_task(dataset_id)      # raises to retry until dataset ready
+    wait_dataset_task(dataset_id)      # in-task polling loop until dataset ready
     preprocess_task(simulation_id, dataset_id)
     chunk_results = simulate_chunk_task.map(
-        [simulation_id] * chunks,
-        list(range(chunks)),  # N determined at runtime
+        simulation_id=unmapped(simulation_id),
+        chunk_index=list(range(chunks)),  # N determined at runtime
     )
-    wait(chunk_results)
-    results_list = [r.result() for r in chunk_results]
+    results_list = chunk_results.result()
     return postprocess_task(simulation_id, results_list)
 ```
 
@@ -285,8 +284,9 @@ Clean `@flow` / `@task` decorator API. Built-in UI at port 4200.
 Inter-workflow dependency via retry task.
 
 **Cons:** CANNOT do transactional enqueue. Medium-high infra (Server + DB).
-Separate datastore from app DB. The `flow.serve()` model can be confusing
-vs. traditional deployment-based scheduling. Inter-workflow dependency is a
+Separate datastore from app DB. The `to_deployment()` + `serve(d1, d2)`
+pattern requires both flows to be deployed before the worker starts.
+Inter-workflow dependency is a
 polling workaround (not a native signal primitive).
 
 **Gap test result:** Same as Temporal — when the Prefect server is down, the
@@ -313,7 +313,7 @@ event = OutboxEvent(
 session.add(event)
 session.commit()
 # → Debezium captures the INSERT via WAL
-# → Publishes to Kafka topic "simapp.dataset"
+# → Publishes to Kafka topic "simapp.outbox_events"
 # → Consumer reads and calls process_dataset()
 ```
 
@@ -324,8 +324,8 @@ not yet `ready`, it sleeps 1s and retries (up to 60 attempts). The DAG
 structure exists only in the consumer code's polling logic. Internal fan-out
 (simulate_chunk × N) is handled in-process by the consumer.
 
-**Infrastructure:** Postgres 17 (with `wal_level=logical`) + Zookeeper +
-Kafka + Debezium Connect. Docker images: `quay.io/debezium/{zookeeper,kafka,connect}:3.6`.
+**Infrastructure:** Postgres 17 (with `wal_level=logical`) + Kafka (KRaft) +
+Debezium Connect. Docker images: `quay.io/debezium/{kafka,connect}:3.6`.
 
 **Key test:** `tests/test_transactional.py` — proves that rollback cancels
 both the business row and the outbox event. `tests/test_simulations.py` —
@@ -336,7 +336,7 @@ app from the task engine. CDC is reliable (WAL-based, no polling). Industry
 standard pattern. Can be combined with Temporal/Prefect/Celery on the
 consumer side.
 
-**Cons:** Heavy infra (Kafka + Debezium + Zookeeper + Connect). CDC adds
+**Cons:** Heavy infra (Kafka (KRaft) + Debezium Connect). CDC adds
 ~100ms-1s latency. Consumers must be idempotent (use outbox event ID for
 dedup). Operational complexity of Kafka cluster. Requires `wal_level=logical`
 on Postgres. Inter-workflow dependency requires polling (same as
@@ -364,7 +364,7 @@ with less compelling DAG support.
 
 **Transactional: NO.** Orchestrated by the Dagster daemon into its own PG.
 
-**DAG: YES.** `DynamicOut` / `.map()` / `.collect()` for runtime fan-out.
+**DAG: YES.** `DynamicOut` / `.map()` for runtime fan-out.
 
 **Why not implemented:** Dagster is a data orchestrator, not designed for
 request-path FastAPI workloads. Overkill for the simulation scenario.
@@ -422,7 +422,7 @@ in-process library. Heavy infra.
 ### If transactional scheduling is non-negotiable (your case)
 
 1. **DBOS Transact** — the only engine that satisfies both requirements.
-   `set_event`/`recv` is native and elegant. `enqueue_in_transaction` is
+   `set_event`/`get_event` is native and elegant. `enqueue_in_transaction` is
    transactional. Recommended for your simulation scenario.
 2. **procrastinate** — if you only need a flat transactional queue and can
    tolerate polling workarounds for the runtime task DAG. Stays on your
@@ -441,7 +441,7 @@ in-process library. Heavy infra.
 
 5. **DBOS** (PG only) — no Kafka, no Redis, no separate server. Just Postgres.
    It's the only engine that gives you transactional enqueue AND runtime task
-   DAG (native `recv`) with minimal infrastructure.
+   DAG (native `get_event`) with minimal infrastructure.
 
 ---
 

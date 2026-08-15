@@ -71,7 +71,7 @@ No 409.
 | Branch | How `simulation → dataset` dependency is expressed |
 |---|---|
 | `main` | `preprocess` task polls `dataset.status` in a loop (1s sleep, 60 max) |
-| `feat/dbos` | `DBOS.recv()` blocks until `DBOS.set_event()` fires |
+| `feat/dbos` | `DBOS.get_event()` blocks until `DBOS.set_event()` fires |
 | `feat/temporal` | `wait_dataset_activity` raises → Temporal retry with backoff |
 | `feat/prefect` | `wait_dataset_task` raises → Prefect retry with backoff |
 | `feat/outbox-cdc` | Consumer handler polls `dataset.status` in a loop |
@@ -84,7 +84,7 @@ No 409.
 | `feat/dbos` | postgres, server, worker |
 | `feat/temporal` | postgres, temporal-postgres, temporal, temporal-ui, server, worker |
 | `feat/prefect` | postgres, prefect-postgres, prefect-server, server, worker |
-| `feat/outbox-cdc` | postgres, zookeeper, kafka, connect, server, worker |
+| `feat/outbox-cdc` | postgres, kafka, connect, server, worker |
 
 ## Key Tests per Branch
 
