@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 from uuid import UUID
 
-from procrastinate import App, PsycopgConnector
+from procrastinate import App, PsycopgConnector, RetryStrategy
 from sqlalchemy.orm import Session
 
 from simapp.config import settings
@@ -40,23 +40,15 @@ def process_dataset(dataset_id: str, filename: str) -> None:
         session.commit()
 
 
-@app.task
+# Raising while the dataset is not ready schedules a 1s retry (up to
+# max_attempts); after that the worker marks the job failed rather
+# than silently swallowing it.
+@app.task(retry=RetryStrategy(max_attempts=60, wait=1))
 def preprocess(simulation_id: str, dataset_id: str) -> None:
-    max_retries = 60
-    for _ in range(max_retries):
-        with SessionLocal() as session:
-            dataset = session.get(Dataset, UUID(dataset_id))
-            if dataset is not None and dataset.status == DatasetStatus.ready:
-                break
-        time.sleep(1)
-    else:
-        with SessionLocal() as session:
-            simulation = session.get(Simulation, UUID(simulation_id))
-            if simulation is not None:
-                simulation.status = SimulationStatus.failed
-                simulation.result = {"error": f"Dataset {dataset_id} not ready after {max_retries}s"}
-                session.commit()
-        return
+    with SessionLocal() as session:
+        dataset = session.get(Dataset, UUID(dataset_id))
+        if dataset is None or dataset.status != DatasetStatus.ready:
+            raise RuntimeError(f"Dataset {dataset_id} not ready")
 
     with SessionLocal() as session:
         simulation = session.get(Simulation, UUID(simulation_id))

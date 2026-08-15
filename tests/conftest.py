@@ -66,13 +66,28 @@ def inprocess_worker(db_engine):
     The Docker background worker reads jobs from the DEV database (simapp).
     Tests that enqueue jobs into simapp_test (via the patched app) therefore
     need a worker on the same database or the jobs never run. This fixture
-    rebinds simapp.tasks.app to a test-DB connector
-    (`App.replace_connector`, which also swaps `self.job_manager.connector`),
-    launches an explicitly built `procrastinate.Worker` in a daemon thread
-    so it can be stopped from the session thread via `Worker.stop()`
-    (thread-safe by design, see worker.py `Worker.stop`), and restores the
-    connector at session end. MUST run after db_engine applies the schema,
-    which the fixture dependency guarantees.
+    builds a SEPARATE procrastinate `App` backed by a TEST-DB connector and
+    runs an explicitly built `procrastinate.Worker` in a daemon thread so it
+    can be stopped from the session thread via `Worker.stop()` (thread-safe
+    by design, see worker.py `Worker.stop`). MUST run after db_engine applies
+    the schema, which the fixture dependency guarantees.
+
+    Rationale for the separate-App + manual task copy:
+    `App.with_connector()` is deprecated (since 2.14.0) and `replace_connector`
+    is not viable here — once a `PsycopgConnector` is opened async by the
+    worker, `get_sync_connector()` returns the async connector, so the sync
+    `defer(connection=sync_dbapi_conn)` path used by the transactional-enqueue
+    tests raises `TypeError` on the async cursor. Building a fresh `App` keeps
+    the main `simapp.tasks.app` connector untouched (lazily-created sync
+    `SyncPsycopgConnector` bridge), so `defer(connection=...)` still works.
+    The fresh `App` cannot discover tasks via `import_paths` because Python
+    caches the already-imported `simapp.tasks` module (its `@app.task`
+    decorators bound to the original `app`), so we copy the task objects
+    into `worker_app.tasks` directly. We intentionally do NOT reassign
+    `task.blueprint`: a running task's chained `self.configure().defer()`
+    calls must continue to route through the original `app.job_manager`
+    (whose connector is `app.open()`ed below) so bare defers enqueue into
+    the TEST db rather than raising `AppNotOpen`.
     """
     # Ordering dependency only: db_engine applies the procrastinate schema
     # before the worker starts.
@@ -81,30 +96,27 @@ def inprocess_worker(db_engine):
     import asyncio
     import traceback
 
-    from procrastinate import PsycopgConnector
+    from procrastinate import App, PsycopgConnector
     from procrastinate.worker import Worker  # procrastinate/__init__ does not export Worker
 
     from simapp.tasks import app
 
-    connector = PsycopgConnector(conninfo=TEST_CONNINFO)
-    # Open the app's own connector pool so bare defer() calls (no
+    # Open the main app's connector pool so bare defer() calls (no
     # connection= kwarg — e.g. task chaining inside a running worker)
     # enqueue through the app's conninfo database (= TEST db in the
     # pytest lane) instead of raising AppNotOpen.
     app.open()
-    # with_connector returns a NEW App sharing the task registry (app.py:
-    # with_connector). The worker must NOT become the app's current connector
-    # via replace_connector: once a PsycopgConnector is opened async,
-    # get_sync_connector() returns the ASYNC connector (psycopg_connector.py
-    # `if self._async_pool: return self`), and defer(connection=fairy).defer()
-    # then bridges into the async cursor path, which raises
-    # TypeError: 'Cursor' object does not support the asynchronous context
-    # manager protocol on the sync SQLAlchemy connection (psycopg_connector.py
-    # `_get_cursor`). Keeping the original app connector unopened keeps
-    # defer-with-connection on the sync bridge (lazily created
-    # SyncPsycopgConnector), while this worker still drains the TEST db
-    # (both conninfos target the same TEST database in the pytest lane).
-    worker_app = app.with_connector(connector)
+
+    worker_connector = PsycopgConnector(conninfo=TEST_CONNINFO)
+    worker_app = App(connector=worker_connector, import_paths=["simapp.tasks"])
+    # import_paths cannot re-register tasks on worker_app (simapp.tasks is
+    # already cached with decorators bound to the original `app`), so copy
+    # the non-builtin task entries verbatim. task.blueprint stays pointing
+    # at `app` so chained defers route through app.job_manager (opened above).
+    for _name, _task in app.tasks.items():
+        if _name.startswith("simapp."):
+            worker_app.tasks[_name] = _task
+
     started = threading.Event()
     startup_error: list[BaseException] = []
     worker_holder: list[Worker] = []
